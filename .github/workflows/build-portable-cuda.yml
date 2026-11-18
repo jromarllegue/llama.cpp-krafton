@@ -82,7 +82,9 @@ jobs:
           }
 
           $redistRoot = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC'
-          $version = Get-ChildItem $redistRoot -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          $version = Get-ChildItem $redistRoot -Directory |
+            Where-Object { Test-Path (Join-Path $_.FullName 'x64\Microsoft.VC143.CRT') } |
+            Sort-Object Name -Descending | Select-Object -First 1
           if (-not $version) { throw 'MSVC redistributable directory was not found.' }
           $crt = Join-Path $version.FullName 'x64\Microsoft.VC143.CRT'
           if (-not (Test-Path $crt)) { throw 'MSVC x64 runtime DLLs were not found.' }
