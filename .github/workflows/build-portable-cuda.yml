@@ -1,0 +1,97 @@
+name: Build Portable CUDA (Raon-1-nano)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_version:
+        description: CUDA Toolkit version
+        required: true
+        type: choice
+        default: '12.4'
+        options:
+          - '12.4'
+          - '13.4'
+
+permissions:
+  contents: read
+
+jobs:
+  cuda:
+    name: windows-cuda (${{ inputs.cuda_version }}, x64)
+    runs-on: windows-2022
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          ref: raon-1-nano
+
+      - name: Install Cuda Toolkit
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: ${{ inputs.cuda_version }}
+          cuda_arch: x64
+
+      - name: Install Ninja
+        run: |
+          choco install ninja -y
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CPU=ON ^
+            -DGGML_CUDA=ON ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_CUDA_CCCL_VERSION=v3.4.3
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      - name: Pack artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dst = '.\portable'
+          $src = '.\build\bin\Release'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+
+          if (-not (Test-Path "$src\llama-server.exe") -or -not (Test-Path "$src\llama-cli.exe") -or -not (Test-Path "$src\ggml-cuda.dll")) {
+            throw 'Expected llama-server.exe, llama-cli.exe, or ggml-cuda.dll is missing.'
+          }
+
+          Copy-Item "$src\*.exe" $dst
+          Copy-Item "$src\*.dll" $dst
+          Copy-Item '.\LICENSE' $dst
+
+          $cudaPaths = @(
+            (Join-Path $env:CUDA_PATH 'bin'),
+            (Join-Path $env:CUDA_PATH 'bin\x64'),
+            (Join-Path $env:CUDA_PATH 'lib')
+          )
+          foreach ($pattern in @('cudart64_*.dll', 'cublas64_*.dll', 'cublasLt64_*.dll')) {
+            $dll = Get-ChildItem -Path $cudaPaths -Filter $pattern -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $dll) { throw "Missing CUDA runtime: $pattern" }
+            Copy-Item $dll.FullName $dst
+          }
+
+          $redistRoot = 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC'
+          $version = Get-ChildItem $redistRoot -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $version) { throw 'MSVC redistributable directory was not found.' }
+          $crt = Join-Path $version.FullName 'x64\Microsoft.VC143.CRT'
+          if (-not (Test-Path $crt)) { throw 'MSVC x64 runtime DLLs were not found.' }
+          Copy-Item "$crt\*.dll" $dst
+          $openmp = Join-Path $version.FullName 'x64\Microsoft.VC143.OpenMP'
+          if (Test-Path $openmp) { Copy-Item "$openmp\*.dll" $dst }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: raon-1-nano-win-cuda-${{ inputs.cuda_version }}-x64
+          path: portable/
+          if-no-files-found: error
+          retention-days: 7
